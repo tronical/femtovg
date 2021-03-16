@@ -1,5 +1,5 @@
 use fnv::FnvHashMap;
-use owned_ttf_parser::{AsFontRef, Font as TtfFont, GlyphId, OwnedFont};
+use owned_ttf_parser::{AsFontRef, Font as TtfFont, GlyphId};
 
 use crate::{ErrorKind, Path};
 
@@ -81,17 +81,28 @@ impl FontMetrics {
     }
 }
 
-pub(crate) struct Font {
+/// The Font trait provides the basic abstraction over font data to femtovg.
+/// The primary [[Self::data()]] accessor return a slice of the underlying
+/// True Type font data. The other accessors are provided for convenience, allowing
+/// the implementor to cache values for convenience.
+pub trait Font {
+    fn data(&self) -> &[u8];
+    fn metrics(&self, size: f32) -> FontMetrics;
+    fn scale(&self, size: f32) -> f32;
+    fn glyph(&mut self, codepoint: u16) -> Option<&Glyph>;
+}
+
+pub(crate) struct OwnedFont {
     data: Vec<u8>,
-    owned_ttf_font: OwnedFont,
+    owned_ttf_font: owned_ttf_parser::OwnedFont,
     units_per_em: u16,
     metrics: FontMetrics,
     glyphs: FnvHashMap<u16, Glyph>,
 }
 
-impl Font {
+impl OwnedFont {
     pub fn new(data: &[u8]) -> Result<Self, ErrorKind> {
-        let owned_ttf_font = OwnedFont::from_vec(data.to_owned(), 0).ok_or(ErrorKind::FontParseError)?;
+        let owned_ttf_font = owned_ttf_parser::OwnedFont::from_vec(data.to_owned(), 0).ok_or(ErrorKind::FontParseError)?;
 
         let units_per_em = owned_ttf_font
             .as_font()
@@ -122,15 +133,17 @@ impl Font {
         })
     }
 
-    pub fn data(&self) -> &[u8] {
-        self.data.as_ref()
-    }
-
     fn font_ref(&self) -> &TtfFont<'_> {
         self.owned_ttf_font.as_font()
     }
+}
 
-    pub fn metrics(&self, size: f32) -> FontMetrics {
+impl Font for OwnedFont {
+    fn data(&self) -> &[u8] {
+        self.data.as_ref()
+    }
+
+    fn metrics(&self, size: f32) -> FontMetrics {
         let mut metrics = self.metrics;
 
         metrics.scale(self.scale(size));
@@ -138,11 +151,11 @@ impl Font {
         metrics
     }
 
-    pub fn scale(&self, size: f32) -> f32 {
+    fn scale(&self, size: f32) -> f32 {
         size / self.units_per_em as f32
     }
 
-    pub fn glyph(&mut self, codepoint: u16) -> Option<&mut Glyph> {
+    fn glyph(&mut self, codepoint: u16) -> Option<&Glyph> {
         if !self.glyphs.contains_key(&codepoint) {
             let mut path = Path::new();
 
@@ -164,6 +177,12 @@ impl Font {
             }
         }
 
-        self.glyphs.get_mut(&codepoint)
+        self.glyphs.get(&codepoint)
+    }
+}
+
+impl Into<Box<dyn Font>> for OwnedFont {
+    fn into(self) -> Box<dyn Font> {
+        Box::new(self)
     }
 }

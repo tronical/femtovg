@@ -19,8 +19,8 @@ mod atlas;
 pub use atlas::Atlas;
 
 mod font;
-use font::Font;
-pub use font::FontMetrics;
+use font::OwnedFont;
+pub use font::{Font, FontMetrics};
 
 // This padding is an empty border around the glyph’s pixels but inside the
 // sampled area (texture coordinates) for the quad in render_atlas().
@@ -179,7 +179,7 @@ struct FontTexture {
 }
 
 pub(crate) struct TextContext {
-    fonts: Arena<Font>,
+    fonts: Arena<Box<dyn Font>>,
     shaping_run_cache: ShapingRunCache<FnvBuildHasher>,
     shaped_words_cache: ShapedWordsCache<FnvBuildHasher>,
     textures: Vec<FontTexture>,
@@ -233,27 +233,31 @@ impl TextContext {
     pub fn add_font_mem(&mut self, data: &[u8]) -> Result<FontId, ErrorKind> {
         self.clear_caches();
 
-        let font = Font::new(data)?;
-        Ok(FontId(self.fonts.insert(font)))
+        self.add_custom_font(OwnedFont::new(data)?)
     }
 
-    pub fn font(&self, id: FontId) -> Option<&Font> {
-        self.fonts.get(id.0)
+    pub fn add_custom_font<F: Into<Box<dyn crate::text::Font>>>(&mut self, font: F) -> Result<FontId, ErrorKind> {
+        self.clear_caches();
+        Ok(FontId(self.fonts.insert(font.into())))
     }
 
-    pub fn font_mut(&mut self, id: FontId) -> Option<&mut Font> {
-        self.fonts.get_mut(id.0)
+    pub fn font(&self, id: FontId) -> Option<&dyn Font> {
+        self.fonts.get(id.0).map(|boxed_font| boxed_font.as_ref())
+    }
+
+    pub fn font_mut(&mut self, id: FontId) -> Option<&mut (dyn Font + 'static)> {
+        self.fonts.get_mut(id.0).map(|boxed_font| boxed_font.as_mut())
     }
 
     pub fn find_font<F, T>(&mut self, _text: &str, paint: &Paint, mut callback: F) -> Result<T, ErrorKind>
     where
-        F: FnMut((FontId, &mut Font)) -> (bool, T),
+        F: FnMut((FontId, &mut (dyn Font + 'static))) -> (bool, T),
     {
         // Try each font in the paint
         for maybe_font_id in paint.font_ids.iter() {
             if let Some(font_id) = maybe_font_id {
                 if let Some(font) = self.fonts.get_mut(font_id.0) {
-                    let (has_missing, result) = callback((*font_id, font));
+                    let (has_missing, result) = callback((*font_id, font.as_mut()));
 
                     if !has_missing {
                         return Ok(result);
@@ -267,7 +271,7 @@ impl TextContext {
         // Try each registered font
         // An optimisation here would be to skip fonts that were tried by the paint
         for (id, font) in &mut self.fonts {
-            let (has_missing, result) = callback((FontId(id), font));
+            let (has_missing, result) = callback((FontId(id), font.as_mut()));
 
             if !has_missing {
                 return Ok(result);
@@ -276,7 +280,7 @@ impl TextContext {
 
         // Just return the first font at this point and let it render .nodef glyphs
         if let Some((id, font)) = self.fonts.iter_mut().next() {
-            return Ok(callback((FontId(id), font)).1);
+            return Ok(callback((FontId(id), font.as_mut())).1);
         }
 
         Err(ErrorKind::NoFontFound)
